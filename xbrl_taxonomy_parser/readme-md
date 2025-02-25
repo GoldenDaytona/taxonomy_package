@@ -1,0 +1,116 @@
+# XBRL Taxonomy Parser
+
+A Python package for parsing XBRL (eXtensible Business Reporting Language) taxonomies and converting them to a structured JSON format for easier analysis and consumption.
+
+## Features
+
+- Parses XBRL taxonomy files (XSD schemas, linkbases, etc.)
+- Extracts concept definitions, labels, references, and relationships
+- Resolves imports and includes
+- Handles dimensional structures
+- Generates concept hierarchies
+- Provides statistics and analytics about the taxonomy
+- Outputs structured JSON files
+
+## Installation
+
+Clone this repository and install using pip:
+
+```bash
+git clone https://github.com/yourusername/xbrl-taxonomy-parser.git
+cd xbrl-taxonomy-parser
+pip install -e .
+```
+
+## Usage
+
+### Command Line Interface
+
+```bash
+python -m xbrl_taxonomy_parser --base-dir /path/to/taxonomy --taxonomy-entry /path/to/entry-point.xsd --output-dir /path/to/output
+```
+
+### API Usage
+
+```python
+from xbrl_taxonomy_parser import parse_taxonomy
+
+# Parse the taxonomy
+output_file = parse_taxonomy(
+    base_dir="/path/to/taxonomy",
+    taxonomy_entry="/path/to/entry-point.xsd",
+    output_dir="/path/to/output"
+)
+
+print(f"Taxonomy parsing complete. Main output file: {output_file}")
+```
+
+## Directory Structure
+
+The package is organized as follows:
+
+```
+xbrl_taxonomy_parser/
+├── __init__.py               # Package initialization
+├── __main__.py               # Entry point for running as a module
+├── cli.py                    # Command-line interface
+├── parser.py                 # XBRL taxonomy parser class
+├── writer.py                 # XBRL taxonomy writer class
+├── stats.py                  # XBRL taxonomy statistics class
+└── utils.py                  # Utility functions and constants
+```
+
+## Taxonomy Structure Requirements
+
+To properly resolve external references, the taxonomy should be organized with the following directory structure:
+
+```
+base_dir/
+├── us-gaap/         # US GAAP taxonomy files
+├── sec/             # SEC taxonomy files
+├── fasb/            # FASB taxonomy files
+└── xbrl/            # XBRL core taxonomy files
+```
+
+## Output Files
+
+The parser generates the following JSON files:
+
+- `complete_taxonomy.json`: The complete taxonomy data
+- `concepts.json`: Concept definitions
+- `linkbases.json`: Linkbase information
+- `role_types.json`: Role type definitions
+- `dimensions.json`: Dimensional information
+- `concept_hierarchy.json`: Hierarchical representation of concepts
+- `taxonomy_stats.json`: Statistics about the taxonomy
+
+## Example
+
+```python
+from xbrl_taxonomy_parser import XBRLTaxonomyParser, XBRLTaxonomyWriter, XBRLTaxonomyStats
+
+# Create the parser
+parser = XBRLTaxonomyParser(
+    base_dir="/path/to/taxonomy",
+    taxonomy_entry="/path/to/entry-point.xsd",
+    output_dir="/path/to/output"
+)
+
+# Parse the taxonomy
+taxonomy_data = parser.parse()
+
+# Create the writer
+writer = XBRLTaxonomyWriter(taxonomy_data, "/path/to/output")
+
+# Write the concept hierarchy
+writer.write_concept_hierarchy()
+
+# Get statistics
+stats = XBRLTaxonomyStats(taxonomy_data)
+basic_stats = stats.get_basic_stats()
+print(f"Total concepts: {basic_stats['totalConcepts']}")
+```
+
+## License
+
+MIT
