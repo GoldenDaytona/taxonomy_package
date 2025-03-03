@@ -10,11 +10,11 @@ __version__ = "1.0.0"
 from .parser import XBRLTaxonomyParser
 from .writer import XBRLTaxonomyWriter
 from .stats import XBRLTaxonomyStats
-from .cli import parse_taxonomy
+from .__main__ import parse_xbrl_taxonomy
 
 __all__ = [
     "XBRLTaxonomyParser",
     "XBRLTaxonomyWriter",
     "XBRLTaxonomyStats",
-    "parse_taxonomy"
+    "parse_xbrl_taxonomy"
 ]

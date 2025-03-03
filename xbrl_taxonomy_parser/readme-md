@@ -1,116 +1,114 @@
-# XBRL Taxonomy Parser
+# XBRL Taxonomy Parser - Implementation Guide
 
-A Python package for parsing XBRL (eXtensible Business Reporting Language) taxonomies and converting them to a structured JSON format for easier analysis and consumption.
+## Overview of Improvements
 
-## Features
+I've made several significant improvements to the XBRL Taxonomy Parser codebase to address your requirements:
 
-- Parses XBRL taxonomy files (XSD schemas, linkbases, etc.)
-- Extracts concept definitions, labels, references, and relationships
-- Resolves imports and includes
-- Handles dimensional structures
-- Generates concept hierarchies
-- Provides statistics and analytics about the taxonomy
-- Outputs structured JSON files
+1. **Simplified Entry Point**: Removed CLI dependencies in favor of a straightforward Python API
+2. **Automated Report Generation**: Stats are now automatically saved as JSON files
+3. **Performance Optimizations**: Faster XML/XSD parsing with caching and parallelization
+4. **Improved Code Readability**: Better organization, comments, and naming
+5. **Enhanced Repository Structure**: Updated to handle the new folder structure for external references
 
-## Installation
+## Key Changes
 
-Clone this repository and install using pip:
+### 1. Removed CLI Dependencies
 
-```bash
-git clone https://github.com/yourusername/xbrl-taxonomy-parser.git
-cd xbrl-taxonomy-parser
-pip install -e .
-```
+- Eliminated `cli.py` completely
+- Simplified `__main__.py` to provide a clean Python interface
+- Created a unified entry point function `parse_xbrl_taxonomy()`
+- Updated `__init__.py` to expose only the necessary functions and classes
 
-## Usage
+### 2. Automated Report Generation
 
-### Command Line Interface
+- Added `save_report()` method to `XBRLTaxonomyStats` class
+- Reports are automatically saved during the parsing process
+- Integrated stats generation with the main workflow
+- Added extra statistics like namespace and period type stats
 
-```bash
-python -m xbrl_taxonomy_parser --base-dir /path/to/taxonomy --taxonomy-entry /path/to/entry-point.xsd --output-dir /path/to/output
-```
+### 3. Performance Optimizations
 
-### API Usage
+#### Caching Improvements
+- Implemented global file cache to avoid re-reading files
+- Added path resolution cache to speed up URL-to-file mappings
+- Used `lru_cache` for frequently called methods
+
+#### Parallel Processing
+- Added multi-threading for independent parsing operations
+- Used ThreadPoolExecutor to parallelize:
+  - Processing of imports and includes
+  - Processing of linkbase references
+  - Processing of different linkbase types
+
+#### XML Parsing
+- Added support for lxml if available (faster than ElementTree)
+- Reduced redundant XML operations
+- Optimized node lookups with better XPath queries
+
+### 4. Improved Code Readability
+
+- Added detailed docstrings and comments
+- Improved variable naming for clarity
+- Reorganized complex functions into smaller, more focused ones
+- Added type hints consistently
+- Created helper methods for common operations
+
+### 5. Enhanced Repository Structure
+
+- Updated URL to local path mapping logic
+- Added support for the new repo structure (repo -> http -> www.xbrl.org -> 2003 -> xsd files)
+- Implemented fallback mechanisms for finding files across protocol variants (http/https)
+
+## Usage Example
 
 ```python
-from xbrl_taxonomy_parser import parse_taxonomy
+from xbrl_taxonomy_parser import parse_xbrl_taxonomy
 
-# Parse the taxonomy
-output_file = parse_taxonomy(
+# Parse the taxonomy with a single function call
+taxonomy_data = parse_xbrl_taxonomy(
     base_dir="/path/to/taxonomy",
     taxonomy_entry="/path/to/entry-point.xsd",
     output_dir="/path/to/output"
 )
 
-print(f"Taxonomy parsing complete. Main output file: {output_file}")
+# All files are automatically saved to the output directory:
+# - complete_taxonomy.json
+# - concepts.json
+# - linkbases.json
+# - role_types.json
+# - dimensions.json
+# - concept_hierarchy.json
+# - dimensional_structure.json
+# - taxonomy_stats.json
 ```
 
-## Directory Structure
+## File Structure
 
-The package is organized as follows:
+The optimized codebase maintains the same overall structure but with improved internals:
 
 ```
 xbrl_taxonomy_parser/
 ├── __init__.py               # Package initialization
-├── __main__.py               # Entry point for running as a module
-├── cli.py                    # Command-line interface
-├── parser.py                 # XBRL taxonomy parser class
-├── writer.py                 # XBRL taxonomy writer class
-├── stats.py                  # XBRL taxonomy statistics class
-└── utils.py                  # Utility functions and constants
+├── __main__.py               # Simple Python main entry point
+├── parser.py                 # Optimized XBRL taxonomy parser
+├── writer.py                 # Improved XBRL taxonomy writer
+├── stats.py                  # Enhanced statistics generation
+└── utils.py                  # Utility functions with caching
 ```
 
-## Taxonomy Structure Requirements
+## Repository Structure Support
 
-To properly resolve external references, the taxonomy should be organized with the following directory structure:
+The parser now supports the following repository folder structure for external references:
 
 ```
 base_dir/
-├── us-gaap/         # US GAAP taxonomy files
-├── sec/             # SEC taxonomy files
-├── fasb/            # FASB taxonomy files
-└── xbrl/            # XBRL core taxonomy files
+├── repo/                    # Repository root for external references
+│   ├── http/                # HTTP protocol references
+│   │   └── www.xbrl.org/    # Domain structure
+│   │       └── 2003/        # Path structure
+│   │           └── *.xsd    # XSD files
+│   └── https/               # HTTPS protocol references
+└── ...                      # Other directories
 ```
 
-## Output Files
-
-The parser generates the following JSON files:
-
-- `complete_taxonomy.json`: The complete taxonomy data
-- `concepts.json`: Concept definitions
-- `linkbases.json`: Linkbase information
-- `role_types.json`: Role type definitions
-- `dimensions.json`: Dimensional information
-- `concept_hierarchy.json`: Hierarchical representation of concepts
-- `taxonomy_stats.json`: Statistics about the taxonomy
-
-## Example
-
-```python
-from xbrl_taxonomy_parser import XBRLTaxonomyParser, XBRLTaxonomyWriter, XBRLTaxonomyStats
-
-# Create the parser
-parser = XBRLTaxonomyParser(
-    base_dir="/path/to/taxonomy",
-    taxonomy_entry="/path/to/entry-point.xsd",
-    output_dir="/path/to/output"
-)
-
-# Parse the taxonomy
-taxonomy_data = parser.parse()
-
-# Create the writer
-writer = XBRLTaxonomyWriter(taxonomy_data, "/path/to/output")
-
-# Write the concept hierarchy
-writer.write_concept_hierarchy()
-
-# Get statistics
-stats = XBRLTaxonomyStats(taxonomy_data)
-basic_stats = stats.get_basic_stats()
-print(f"Total concepts: {basic_stats['totalConcepts']}")
-```
-
-## License
-
-MIT
+This structure is handled automatically by the improved path resolution logic.

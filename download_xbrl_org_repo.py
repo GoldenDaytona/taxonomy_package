@@ -34,7 +34,7 @@ def download_xbrl_files(target_directory):
             # Check if file has a valid extension
             if not filename.lower().endswith(valid_extensions):
                 continue  # Skip files that don't match desired extensions
-            year_folder = os.path.join(target_directory, 'repo', 'http', 'www.xbrl.org', str(year))
+            year_folder = os.path.join(target_directory, 'resources', 'http', 'www.xbrl.org', str(year))
             target_path = os.path.join(year_folder, filename)
             download_file(link, target_path)
 

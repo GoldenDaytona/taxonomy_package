@@ -9,11 +9,29 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Union
-import xml.etree.ElementTree as ET
 from collections import defaultdict
+import concurrent.futures
+from functools import lru_cache
 import re
 
-from .utils import NAMESPACES, setup_logger, get_timestamp, resolve_path, map_url_to_local_path
+# Try to use lxml for better performance if available, otherwise fall back to ElementTree
+try:
+    from lxml import etree as ET
+    USING_LXML = True
+except ImportError:
+    import xml.etree.ElementTree as ET
+    USING_LXML = False
+
+from .utils import (
+    NAMESPACES,
+    setup_logger,
+    get_timestamp,
+    resolve_path,
+    map_url_to_local_path,
+    FILE_CACHE,
+    clear_caches
+)
+
 
 class XBRLTaxonomyParser:
     """
@@ -21,7 +39,8 @@ class XBRLTaxonomyParser:
     and converts it to a structured JSON format.
     """
 
-    def __init__(self, base_dir: str, taxonomy_entry: str, output_dir: str):
+    def __init__(self, base_dir: str, taxonomy_entry: str, output_dir: str,
+                 max_workers: int = 4):
         """
         Initialize the XBRL taxonomy parser.
 
@@ -29,10 +48,12 @@ class XBRLTaxonomyParser:
             base_dir: Base directory containing the taxonomy files
             taxonomy_entry: Path to the entry point XSD file
             output_dir: Directory to save the output JSON files
+            max_workers: Maximum number of parallel workers for file processing
         """
         self.base_dir = os.path.normpath(base_dir)
         self.taxonomy_entry = os.path.normpath(taxonomy_entry)
         self.output_dir = os.path.normpath(output_dir)
+        self.max_workers = max_workers
 
         # Ensure output directory exists
         os.makedirs(self.output_dir, exist_ok=True)
@@ -45,13 +66,13 @@ class XBRLTaxonomyParser:
 
         # Main storage for parsed elements
         self.concepts: Dict[str, Dict[str, Any]] = {}
-        self.linkbases: Dict[str, Dict[str, Any]] = {}
+        self.linkbases: Dict[str, Dict[str, Any]] = defaultdict(dict)
         self.role_types: Dict[str, Dict[str, Any]] = {}
         self.arcrole_types: Dict[str, Dict[str, Any]] = {}
         self.enumerations: Dict[str, Dict[str, Any]] = {}
         self.dimensions: Dict[str, Dict[str, Any]] = {}
-        
-        # URL to local path mappings - including the new mapping for FASB
+
+        # URL to local path mappings
         self.url_mappings = {
             'http://www.xbrl.org/': os.path.join(self.base_dir, 'xbrl'),
             'http://taxonomies.xbrl.us/': os.path.join(self.base_dir, 'us'),
@@ -60,6 +81,9 @@ class XBRLTaxonomyParser:
             'https://xbrl.sec.gov/': os.path.join(self.base_dir, 'sec'),
             'http://xbrl.sec.gov/': os.path.join(self.base_dir, 'sec')
         }
+
+        # Namespace cache for quick lookups
+        self.namespace_cache: Dict[str, str] = {}
 
     def parse(self) -> Dict[str, Any]:
         """
@@ -70,6 +94,9 @@ class XBRLTaxonomyParser:
         """
         self.logger.info(f"Starting to parse taxonomy from: {self.taxonomy_entry}")
 
+        # Clear any previous caches
+        clear_caches()
+
         # Parse the main entry point
         self._parse_schema(self.taxonomy_entry)
 
@@ -78,10 +105,12 @@ class XBRLTaxonomyParser:
             "metadata": {
                 "entryPoint": self.taxonomy_entry,
                 "baseDir": self.base_dir,
-                "timestamp": get_timestamp()
+                "timestamp": get_timestamp(),
+                "parserVersion": "2.0.0",
+                "usingLxml": USING_LXML
             },
             "concepts": self.concepts,
-            "linkbases": self.linkbases,
+            "linkbases": dict(self.linkbases),  # Convert defaultdict to regular dict
             "roleTypes": self.role_types,
             "arcroleTypes": self.arcrole_types,
             "dimensions": self.dimensions,
@@ -91,11 +120,8 @@ class XBRLTaxonomyParser:
         # Save the complete taxonomy
         self._save_json(taxonomy_data, "complete_taxonomy.json")
 
-        # Save individual components for easier access
-        self._save_json(self.concepts, "concepts.json")
-        self._save_json(self.linkbases, "linkbases.json")
-        self._save_json(self.role_types, "role_types.json")
-        self._save_json(self.dimensions, "dimensions.json")
+        # Clear caches to free memory
+        clear_caches()
 
         self.logger.info(f"Parsing complete. Files saved to: {self.output_dir}")
         return taxonomy_data
@@ -122,27 +148,39 @@ class XBRLTaxonomyParser:
         self.logger.info(f"Parsing schema: {schema_path}")
 
         try:
-            # Parse the XML schema
-            tree = ET.parse(schema_path)
-            root = tree.getroot()
+            # Check if we already have this file in cache
+            if schema_path in FILE_CACHE:
+                root = FILE_CACHE[schema_path]
+            else:
+                # Parse the XML schema
+                tree = ET.parse(schema_path)
+                root = tree.getroot()
+                FILE_CACHE[schema_path] = root
 
             # Get the target namespace
             target_namespace = root.get('targetNamespace', '')
 
+            # Cache the namespace for this schema
+            self.namespace_cache[schema_path] = target_namespace
+
             # Process imports and includes
             self._process_imports_and_includes(root, schema_path)
 
-            # Process elements (concepts)
-            self._process_elements(root, target_namespace, schema_path)
+            # Process schema components in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit tasks
+                elements_future = executor.submit(self._process_elements, root, target_namespace, schema_path)
+                role_types_future = executor.submit(self._process_role_types, root, target_namespace)
+                arcrole_types_future = executor.submit(self._process_arcrole_types, root, target_namespace)
+                linkbase_refs_future = executor.submit(self._process_linkbase_refs, root, schema_path)
 
-            # Process role types
-            self._process_role_types(root, target_namespace)
-
-            # Process arcrole types
-            self._process_arcrole_types(root, target_namespace)
-
-            # Process linkbases referenced in the schema
-            self._process_linkbase_refs(root, schema_path)
+                # Wait for all tasks to complete
+                concurrent.futures.wait([
+                    elements_future,
+                    role_types_future,
+                    arcrole_types_future,
+                    linkbase_refs_future
+                ])
 
         except Exception as e:
             self.logger.error(f"Error parsing schema {schema_path}: {str(e)}")
@@ -157,25 +195,34 @@ class XBRLTaxonomyParser:
         """
         schema_dir = os.path.dirname(schema_path)
 
-        # Process imports
+        # Find all imports and includes in one pass
+        imports_includes = []
+
         for import_elem in root.findall('.//xs:import', NAMESPACES):
             schema_location = import_elem.get('schemaLocation')
             if schema_location:
-                import_path = self._resolve_path(schema_location, schema_dir)
-                if os.path.exists(import_path):
-                    self._parse_schema(import_path)
-                else:
-                    self.logger.warning(f"Import schema not found: {import_path}")
+                imports_includes.append(schema_location)
 
-        # Process includes
         for include_elem in root.findall('.//xs:include', NAMESPACES):
             schema_location = include_elem.get('schemaLocation')
             if schema_location:
-                include_path = self._resolve_path(schema_location, schema_dir)
-                if os.path.exists(include_path):
-                    self._parse_schema(include_path)
-                else:
-                    self.logger.warning(f"Include schema not found: {include_path}")
+                imports_includes.append(schema_location)
+
+        # Process imports and includes in parallel
+        if imports_includes:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = []
+
+                for schema_location in imports_includes:
+                    import_path = self._resolve_path(schema_location, schema_dir)
+                    if os.path.exists(import_path) and import_path not in self.processed_schemas:
+                        futures.append(executor.submit(self._parse_schema, import_path))
+                    else:
+                        if import_path not in self.processed_schemas:
+                            self.logger.warning(f"Schema not found: {import_path}")
+
+                # Wait for all imports/includes to complete
+                concurrent.futures.wait(futures)
 
     def _resolve_path(self, reference_path: str, base_dir: str) -> str:
         """
@@ -400,18 +447,31 @@ class XBRLTaxonomyParser:
         """
         schema_dir = os.path.dirname(schema_path)
 
+        # Collect all linkbase references
+        linkbase_refs = []
+
         for linkbase_ref in root.findall('.//link:linkbaseRef', NAMESPACES):
             xlink_href = linkbase_ref.get(f"{{{NAMESPACES['xlink']}}}href")
             xlink_role = linkbase_ref.get(f"{{{NAMESPACES['xlink']}}}role", '')
 
             if xlink_href:
                 linkbase_path = self._resolve_path(xlink_href, schema_dir)
+                linkbase_refs.append((linkbase_path, xlink_role))
 
-                # Check if file exists
-                if os.path.exists(linkbase_path):
-                    self._parse_linkbase(linkbase_path, xlink_role)
-                else:
-                    self.logger.warning(f"Linkbase file not found: {linkbase_path}")
+        # Process linkbases in parallel
+        if linkbase_refs:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = []
+
+                for linkbase_path, xlink_role in linkbase_refs:
+                    # Check if file exists
+                    if os.path.exists(linkbase_path):
+                        futures.append(executor.submit(self._parse_linkbase, linkbase_path, xlink_role))
+                    else:
+                        self.logger.warning(f"Linkbase file not found: {linkbase_path}")
+
+                # Wait for all linkbases to be parsed
+                concurrent.futures.wait(futures)
 
     def _parse_linkbase(self, linkbase_path: str, role: str = '') -> None:
         """
@@ -424,24 +484,32 @@ class XBRLTaxonomyParser:
         self.logger.info(f"Parsing linkbase: {linkbase_path}")
 
         try:
-            # Parse the XML linkbase
-            tree = ET.parse(linkbase_path)
-            root = tree.getroot()
+            # Check if we already have this file in cache
+            if linkbase_path in FILE_CACHE:
+                root = FILE_CACHE[linkbase_path]
+            else:
+                # Parse the XML linkbase
+                tree = ET.parse(linkbase_path)
+                root = tree.getroot()
+                FILE_CACHE[linkbase_path] = root
 
-            # Process label linkbases
-            self._process_label_links(root, linkbase_path)
+            # Process different types of links in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit tasks
+                label_future = executor.submit(self._process_label_links, root, linkbase_path)
+                ref_future = executor.submit(self._process_reference_links, root, linkbase_path)
+                pres_future = executor.submit(self._process_presentation_links, root, linkbase_path)
+                calc_future = executor.submit(self._process_calculation_links, root, linkbase_path)
+                def_future = executor.submit(self._process_definition_links, root, linkbase_path)
 
-            # Process reference linkbases
-            self._process_reference_links(root, linkbase_path)
-
-            # Process presentation linkbases
-            self._process_presentation_links(root, linkbase_path)
-
-            # Process calculation linkbases
-            self._process_calculation_links(root, linkbase_path)
-
-            # Process definition linkbases
-            self._process_definition_links(root, linkbase_path)
+                # Wait for all tasks to complete
+                concurrent.futures.wait([
+                    label_future,
+                    ref_future,
+                    pres_future,
+                    calc_future,
+                    def_future
+                ])
 
         except Exception as e:
             self.logger.error(f"Error parsing linkbase {linkbase_path}: {str(e)}")
@@ -681,20 +749,20 @@ class XBRLTaxonomyParser:
                         self.concepts[parent_id][relationship_type] = {}
                     if link_role not in self.concepts[parent_id][relationship_type]:
                         self.concepts[parent_id][relationship_type][link_role] = []
-                    
+
                     self.concepts[parent_id][relationship_type][link_role].extend(sorted_children)
-            
+
             # Also store a separate linkbase structure for easier navigation
-            self.linkbases.setdefault(relationship_type, {}).setdefault(link_role, {
+            self.linkbases[relationship_type][link_role] = {
                 "concepts": list(set(concept_locs.values())),
                 "relationships": dict(relationships),
                 "sourceFile": linkbase_path
-            })
-    
+            }
+
     def _extract_dimensions(self, root: ET.Element, linkbase_path: str) -> None:
         """
         Extract dimensional information from definition linkbases.
-        
+
         Args:
             root: The root element of the linkbase
             linkbase_path: Path to the linkbase file
@@ -702,49 +770,49 @@ class XBRLTaxonomyParser:
         # Find all definitionLink elements
         for definition_link in root.findall('.//link:definitionLink', NAMESPACES):
             link_role = definition_link.get(f"{{{NAMESPACES['xlink']}}}role", '')
-            
+
             # Process all loc elements to get concept references
             concept_locs = {}
             for loc in definition_link.findall('./link:loc', NAMESPACES):
                 xlink_href = loc.get(f"{{{NAMESPACES['xlink']}}}href")
                 xlink_label = loc.get(f"{{{NAMESPACES['xlink']}}}label")
-                
+
                 if xlink_href and xlink_label:
                     # Extract concept ID from the href
                     concept_id = self._extract_concept_id_from_href(xlink_href)
                     if concept_id:
                         concept_locs[xlink_label] = concept_id
-            
+
             # Process definition arcs to identify dimensions
             for definitionArc in definition_link.findall('./link:definitionArc', NAMESPACES):
                 xlink_from = definitionArc.get(f"{{{NAMESPACES['xlink']}}}from")
                 xlink_to = definitionArc.get(f"{{{NAMESPACES['xlink']}}}to")
                 arcrole = definitionArc.get(f"{{{NAMESPACES['xlink']}}}arcrole", '')
-                
+
                 if xlink_from in concept_locs and xlink_to in concept_locs:
                     from_id = concept_locs[xlink_from]
                     to_id = concept_locs[xlink_to]
-                    
+
                     # Check for dimension-domain relationships
                     if arcrole == 'http://xbrl.org/int/dim/arcrole/dimension-domain':
                         self._add_dimension(from_id, to_id, 'domain', link_role, linkbase_path)
-                    
+
                     # Check for domain-member relationships
                     elif arcrole == 'http://xbrl.org/int/dim/arcrole/domain-member':
                         self._add_dimension(from_id, to_id, 'member', link_role, linkbase_path)
-                    
+
                     # Check for hypercube-dimension relationships
                     elif arcrole == 'http://xbrl.org/int/dim/arcrole/hypercube-dimension':
                         self._add_dimension(from_id, to_id, 'dimension', link_role, linkbase_path)
-                    
+
                     # Check for all relationships
                     elif arcrole == 'http://xbrl.org/int/dim/arcrole/all':
                         self._add_dimension(from_id, to_id, 'hypercube', link_role, linkbase_path)
-    
+
     def _add_dimension(self, from_id: str, to_id: str, rel_type: str, link_role: str, source_file: str) -> None:
         """
         Add dimensional information to the dimensions dictionary.
-        
+
         Args:
             from_id: The concept ID of the source concept
             to_id: The concept ID of the target concept
@@ -759,61 +827,79 @@ class XBRLTaxonomyParser:
                 "related": {},
                 "roles": set()
             }
-        
+
         # Initialize relation type
         if rel_type not in self.dimensions[from_id]["related"]:
             self.dimensions[from_id]["related"][rel_type] = set()
-        
+
         # Add target ID
         self.dimensions[from_id]["related"][rel_type].add(to_id)
-        
+
         # Add role
         self.dimensions[from_id]["roles"].add(link_role)
-        
+
         # Make sets serializable to JSON
         for key, value in self.dimensions[from_id]["related"].items():
             self.dimensions[from_id]["related"][key] = list(value)
-        
+
         self.dimensions[from_id]["roles"] = list(self.dimensions[from_id]["roles"])
-        
+
         # Add source file
         self.dimensions[from_id]["sourceFile"] = source_file
-    
+
+    @lru_cache(maxsize=1024)
     def _extract_concept_id_from_href(self, href: str) -> Optional[str]:
         """
-        Extract a concept ID from an XLink href attribute.
-        
+        Extract a concept ID from an XLink href attribute with caching for performance.
+
         Args:
             href: The href attribute value
-            
+
         Returns:
             The concept ID if extraction is successful, None otherwise
         """
         # Remove fragment identifier
         if '#' in href:
             schema_path, fragment = href.split('#', 1)
-            
+
+            # Try to find the namespace from cache
+            if schema_path in self.namespace_cache:
+                namespace = self.namespace_cache[schema_path]
+                return f"{namespace}#{fragment}"
+
             # Try to find the namespace for the schema
-            namespace = None
             for concept in self.concepts.values():
                 if schema_path in concept.get('sourceFile', ''):
                     namespace = concept.get('namespace')
-                    break
-            
-            if namespace:
-                # Return the concept ID
-                return f"{namespace}#{fragment}"
-            else:
-                # Try to extract namespace from schema
-                try:
-                    schema_path = self._resolve_path(schema_path, os.path.dirname(self.taxonomy_entry))
-                    if os.path.exists(schema_path):
-                        tree = ET.parse(schema_path)
-                        root = tree.getroot()
-                        namespace = root.get('targetNamespace')
-                        if namespace:
-                            return f"{namespace}#{fragment}"
-                except Exception:
-                    pass
-        
+                    # Cache for future lookups
+                    self.namespace_cache[schema_path] = namespace
+                    return f"{namespace}#{fragment}"
+
+            # Try to extract namespace from schema
+            try:
+                schema_path = self._resolve_path(schema_path, os.path.dirname(self.taxonomy_entry))
+
+                # Check if we have this file cached
+                if schema_path in FILE_CACHE:
+                    root = FILE_CACHE[schema_path]
+                    namespace = root.get('targetNamespace')
+                    if namespace:
+                        # Cache for future lookups
+                        self.namespace_cache[schema_path] = namespace
+                        return f"{namespace}#{fragment}"
+
+                # If not cached, parse the file
+                if os.path.exists(schema_path):
+                    tree = ET.parse(schema_path)
+                    root = tree.getroot()
+                    FILE_CACHE[schema_path] = root
+
+                    namespace = root.get('targetNamespace')
+                    if namespace:
+                        # Cache for future lookups
+                        self.namespace_cache[schema_path] = namespace
+                        return f"{namespace}#{fragment}"
+            except Exception:
+                pass
+
         return None
